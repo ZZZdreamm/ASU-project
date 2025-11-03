@@ -6,14 +6,11 @@ import shutil
 import time
 from pathlib import Path
 
-# --- KONFIGURACJA ---
 CONFIG_FILE = Path(".clean_files")
 
 def load_config():
-    """Wczytuje parametry z pliku konfiguracyjnego."""
     config = configparser.ConfigParser()
     
-    # Ustawienie wartości domyślnych na wypadek braku pliku konfiguracyjnego
     config['Settings'] = {
         'suggested_permissions': 'rw-r--r--',
         'troublesome_chars': ':;*?"$#`|\\.', 
@@ -23,31 +20,23 @@ def load_config():
     
     if not CONFIG_FILE.exists():
         print(f"⚠️ Uwaga: Nie znaleziono pliku konfiguracyjnego: {CONFIG_FILE}")
-        # Można zapisać domyślny plik, by ułatwić edycję
         with open(CONFIG_FILE, 'w') as f:
             config.write(f)
-        print(f"   Utworzono domyślny plik konfiguracyjny. Używam wartości domyślnych.")
+        print(f"   Utworzono domyślny plik konfiguracyjny. Używam wartości domyślnych.")
     else:
         config.read(CONFIG_FILE)
 
     settings = config['Settings']
-    
-    # Konwersja formatu 'rw-r--r--' na tryb numeryczny (chmod)
-    # To jest złożony proces, dlatego dla uproszczenia w skrypcie będziemy porównywać z formatem tekstowym
-    # Lepszym podejściem jest użycie os.chmod(..., mode) gdzie mode jest w oktalnym systemie np. 0o644
     
     return {
         'permissions': symbolic_to_octal(settings.get('suggested_permissions')),
         'trouble_chars': list(settings.get('troublesome_chars')),
         'substitute': settings.get('char_substitute'),
         'temp_exts': [e.strip() for e in settings.get('temp_extensions').split(',')],
-        'target_dir': None # Docelowy katalog X - będzie ustawiony z argumentów
+        'target_dir': None
     }
 
-# --- NARZĘDZIA PLIKOWE ---
-
 def calculate_hash(file_path, algorithm='sha256'):
-    """Oblicza sumę kontrolną pliku o dużym rozmiarze."""
     hasher = hashlib.new(algorithm)
     try:
         with open(file_path, 'rb') as f:
@@ -55,87 +44,56 @@ def calculate_hash(file_path, algorithm='sha256'):
                 hasher.update(chunk)
         return hasher.hexdigest()
     except Exception as e:
-        # Prawa dostępu, błąd odczytu itp.
         return f"ERROR: {e}"
 
 def get_file_stats(file_path):
-    """Pobiera statystyki pliku: rozmiar, datę modyfikacji/utworzenia i uprawnienia."""
     stats = file_path.stat()
     return {
         'path': file_path,
         'size': stats.st_size,
-        # Najczęściej data modyfikacji (mtime) i/lub data utworzenia (ctime)
-        # Używamy mtime do wersji, ctime (lub birthtime na niektórych OS) do duplikatów.
         'mtime': stats.st_mtime, 
         'ctime': stats.st_ctime, 
-        'permissions_octal': oct(stats.st_mode)[-3:], # np. '644' z '0o100644'
-        # Reprezentacja tekstowa (rw-r--r--) wymaga bardziej złożonej funkcji
+        'permissions_octal': oct(stats.st_mode)[-3:],
     }
     
 def symbolic_to_octal(symbolic_permissions: str) -> str:
-    """
-    Converts a 9-character symbolic file permission string (e.g., 'rw-r--r--') 
-    to its 3-digit octal representation (e.g., '644').
-    
-    Args:
-        symbolic_permissions: The 9-character string representing permissions.
-        
-    Returns:
-        The 3-digit octal string.
-    
-    Raises:
-        ValueError: If the input string is not 9 characters long.
-    """
     if len(symbolic_permissions) != 9:
         raise ValueError("Permission string must be exactly 9 characters long (e.g., 'rwxr-xr--').")
 
-    # Map each permission letter to its octal value
     permission_map = {'r': 4, 'w': 2, 'x': 1, '-': 0}
     
     octal_parts = []
     
-    # Iterate through the string in groups of three (Owner, Group, Others)
     for i in range(0, 9, 3):
         group_permissions = symbolic_permissions[i:i+3]
         octal_value = 0
         
-        # Sum the values for 'r', 'w', and 'x' in the group
         for char in group_permissions:
-            octal_value += permission_map.get(char, 0) # Use .get for safety
+            octal_value += permission_map.get(char, 0)
             
         octal_parts.append(str(octal_value))
 
     return "".join(octal_parts)
 
-# --- GŁÓWNA LOGIKA SKANOWANIA I ANALIZY ---
-
 def scan_directories(directories):
-    """
-    Skanuje podane katalogi i gromadzi informacje o wszystkich plikach.
-    Zwraca: (lista_plików, mapa_hashy)
-    """
     all_files = []
-    hash_map = {} # { hash: [ {stats1}, {stats2}, ... ] }
+    hash_map = {}
 
     for dir_path in directories:
         print(f"🔎 Skanowanie katalogu: {dir_path}")
         
-        # os.walk jest niezawodne do rekurencyjnego przechodzenia drzewa
         for root, _, files in os.walk(dir_path):
             for file_name in files:
                 file_path = Path(root) / file_name
                 
-                # Użycie try-except do obsługi plików bez praw dostępu
                 try:
                     stats = get_file_stats(file_path)
                     
-                    # 1. Obliczanie hasha
                     file_hash = calculate_hash(file_path)
                     
                     stats['hash'] = file_hash
                     all_files.append(stats)
                     
-                    # 2. Mapowanie hashy
                     if file_hash not in hash_map:
                         hash_map[file_hash] = []
                     hash_map[file_hash].append(stats)
@@ -147,7 +105,6 @@ def scan_directories(directories):
     return all_files, hash_map
 
 def analyze_and_suggest_actions(all_files, hash_map, config):
-    """Analizuje zebrane dane i generuje listę proponowanych akcji."""
     suggestions = []
     
     name_map = {}
@@ -157,20 +114,15 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
             name_map[filename] = []
         name_map[filename].append(file_stats)
     
-    # 1. Duplikaty (identyczna zawartość)
     for file_hash, file_list in hash_map.items():
         if "ERROR" in file_hash:
-             continue # Pomijamy pliki, których nie udało się zahaszować
+             continue
 
         if file_list[0]['size'] == 0:
-            # Puste pliki zostaną obsłużone w kroku 2
             continue
             
         if len(file_list) > 1:
-            # Wiele plików z tym samym hashem = duplikaty
             
-            # Wyszukanie najstarszego pliku (wg. daty utworzenia/ctime)
-            # Najstarsza data to najmniejsza wartość timestamp
             original_file = min(file_list, key=lambda x: x['ctime'])
             
             for file_stats in file_list:
@@ -182,7 +134,6 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
                         'reason': f"Identyczna zawartość ({file_hash}). Oryginał: {original_file['path']}",
                         'target_path': None
                     })
-                # Jeśli to jest oryginalny plik, ale nie jest w katalogu X (target_dir)
                 elif not str(original_file['path']).startswith(str(config['target_dir'])):
                     new_path = config['target_dir'] / original_file['path'].name
                     suggestions.append({
@@ -193,16 +144,12 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
                         'target_path': new_path
                     })
 
-
-    # 2. Puste pliki, pliki tymczasowe, kłopotliwe nazwy i atrybuty
     for file_stats in all_files:
         path = file_stats['path']
         
-        # Sprawdzanie, czy plik nie jest już oznaczony jako duplikat do skasowania
         if any(s['path'] == path and s['suggestion'] == 'DELETE' for s in suggestions):
             continue
 
-        # a) Pliki puste
         if file_stats['size'] == 0:
             suggestions.append({
                 'type': 'EMPTY_FILE',
@@ -213,7 +160,6 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
             })
             continue
 
-        # b) Pliki tymczasowe
         if path.suffix in config['temp_exts'] or any(path.name.endswith(ext) for ext in config['temp_exts']):
             suggestions.append({
                 'type': 'TEMP_FILE',
@@ -224,34 +170,22 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
             })
             continue
 
-        # c) Kłopotliwe nazwy
         original_name = path.name
-        file_stem = path.stem       # Nazwa pliku bez rozszerzenia (np. 'raport.v1' dla 'raport.v1.pdf')
-        file_suffix = path.suffix   # Rozszerzenie (np. '.pdf')
+        file_stem = path.stem
+        file_suffix = path.suffix
         
         new_stem = file_stem
         needs_rename = False
         
-        # Iteracja po nazwie bazowej (bez rozszerzenia)
         for char in config['trouble_chars']:
             if char in new_stem:
-                # Zamiana znaku
                 new_stem = new_stem.replace(char, config['substitute'])
                 needs_rename = True
         
-        # Jeśli oryginalna nazwa pliku zawierała kropki, które nie były rozszerzeniem, 
-        # i te kropki nie są traktowane jako kłopotliwe znaki w config, to problem z kropkami 
-        # wewnątrz nazwy bazowej jest już obsłużony przez 'file_stem'. 
-        
-        # Jeśli użytkownik chciałby traktować '.' jako kłopotliwy znak w środku nazwy,
-        # musi go uwzględnić w 'troublesome_chars' w pliku konfiguracyjnym. 
-        # Dzięki użyciu path.stem kropka separatora rozszerzenia jest bezpieczna.
-
         if needs_rename:
             new_name = new_stem + file_suffix
             new_path = path.parent / new_name
             
-            # Dodatkowy warunek, aby nie proponować zmiany, jeśli nowa nazwa jest taka sama
             if new_name != original_name:
                 suggestions.append({
                     'type': 'RENAME',
@@ -261,9 +195,8 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
                     'target_path': new_path
                 })
         
-        # d) Atrybuty (uproszczone: porównanie z oktalnym stringiem)
-        target_permissions_octal = config['permissions'] # Zakładając, że to pole zostanie poprawnie obliczone
-        if file_stats['permissions_octal'] != target_permissions_octal: # Używam 644 jako przykład
+        target_permissions_octal = config['permissions']
+        if file_stats['permissions_octal'] != target_permissions_octal:
             suggestions.append({
                 'type': 'PERMISSIONS',
                 'path': path,
@@ -272,43 +205,34 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
                 'target_path': None
             })
 
-    # 3. Nowsze wersje (plik o tej samej nazwie, inna zawartość) - Bardzo trudne do automatycznej decyzji!
     for file_name, file_list in name_map.items():
-            # Pomijamy grupy z jednym plikiem
             if len(file_list) <= 1:
                 continue
                 
-            # Sprawdzenie, czy wszystkie pliki są faktycznie identyczne (ten sam hash). 
             all_same_hash = all(f['hash'] == file_list[0]['hash'] for f in file_list)
             
             if not all_same_hash:
-                # To są różne wersje pliku o tej samej nazwie (konflikt nazw, różna treść)
                 
-                # Uporządkowanie według daty modyfikacji (mtime), najnowszy jest na początku (reverse=True)
                 file_list.sort(key=lambda x: x['mtime'], reverse=True)
                 newest_file = file_list[0]
                 
-                # Pominięcie najnowszego pliku i sugerowanie usunięcia starszych
                 for file_stats in file_list[1:]:
                     path = file_stats['path']
                     
-                    # Sprawdzenie, czy plik nie jest już oznaczony do usunięcia
                     if any(s['path'] == path and s['suggestion'] == 'DELETE' for s in suggestions):
                         continue
                         
                     suggestions.append({
                         'type': 'VERSION_CONFLICT',
                         'path': path,
-                        # Użycie DELETE jako sugestii
                         'suggestion': 'DELETE', 
                         'reason': f"Starsza wersja pliku. Nowszy plik (oryginał?) z: {time.ctime(newest_file['mtime'])} jest w {newest_file['path']}",
                         'target_path': None
                     })
-                    
+                        
     return suggestions
 
 def print_suggestions(suggestions):
-    """Wyświetla propozycje akcji w czytelnej formie."""
     print("\n" + "="*50)
     print("📋 PODSUMOWANIE PROPOZYCJI PORZĄDKOWANIA")
     print("="*50)
@@ -319,16 +243,15 @@ def print_suggestions(suggestions):
 
     for i, s in enumerate(suggestions):
         print(f"\n--- Akcja {i+1} ({s['type']}) ---")
-        print(f"Plik:       {s['path']}")
-        print(f"Problem:    {s['reason']}")
-        print(f"SUGESTIA:   **{s['suggestion']}**", end="")
+        print(f"Plik:       {s['path']}")
+        print(f"Problem:    {s['reason']}")
+        print(f"SUGESTIA:   **{s['suggestion']}**", end="")
         if s['target_path']:
             print(f" -> {s['target_path']}")
         else:
             print("")
 
 def perform_action(suggestion, config):
-    """Wykonuje konkretną akcję na pliku i zwraca status operacji."""
     path = suggestion['path']
     action = suggestion['suggestion']
     target = suggestion.get('target_path')
@@ -340,8 +263,6 @@ def perform_action(suggestion, config):
             return True
             
         elif action == 'MOVE_TO_X':
-            # Używamy shutil.move, które obsługuje przenoszenie między systemami plików
-            # Ważne: Tworzymy docelowy katalog, jeśli nie istnieje
             if target:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(path, target)
@@ -350,12 +271,11 @@ def perform_action(suggestion, config):
             
         elif action == 'RENAME':
             if target:
-                path.rename(target) # rename działa także jako move, ale w obrębie tego samego FS
+                path.rename(target)
                 print(f"✅ ZMIENIONO NAZWĘ: {path.name} -> {target.name}")
                 return True
                 
         elif action == 'CHMOD':
-            # Zmiana uprawnień na wartość z konfiguracji
             octal_mode = int(config['permissions'], 8)
             os.chmod(path, octal_mode)
             print(f"✅ ZMIENIONO PRAW: {path} na {config['permissions']}")
@@ -379,17 +299,7 @@ def perform_action(suggestion, config):
         print(f"❌ BŁĄD WYKONANIA: {e}")
         return False
 
-
-GLOBAL_ACTION_MAP = {
-    'y': 'ALWAYS_PERFORM', # Zawsze wykonaj sugerowaną akcję
-    'n': 'ALWAYS_SKIP'     # Zawsze pomiń sugerowaną akcję
-}
-
 def get_user_choice(suggestion):
-    """
-    Pyta użytkownika o potwierdzenie SUGEROWANEJ akcji (Y/N/G - globalnie).
-    Zwraca: 'PERFORM', 'NO_ACTION', 'ALWAYS_PERFORM', 'ALWAYS_SKIP'
-    """
     action = suggestion['suggestion']
     
     prompt = (
@@ -421,58 +331,44 @@ def get_user_choice(suggestion):
             
 
 def execute_actions(suggestions, config):
-    """
-    Interaktywny przebieg pętli akcji.
-    """
     print("\n" + "#"*60)
     print("🤖 START FAZY WYKONYWANIA AKCJI (Interaktywny)")
     print("#"*60)
     
-    # Słownik do przechowywania akcji globalnych dla każdego typu problemu
     global_actions = {} 
     
     for suggestion in suggestions:
         action_type = suggestion['type']
         current_suggestion = suggestion['suggestion']
         
-        # 1. Sprawdzenie, czy dla tego typu problemu zdefiniowano akcję globalną
         if action_type in global_actions:
             action = global_actions[action_type]
             print(f"⚡ Globalna akcja: {action} dla typu {action_type}.")
         else:
-            # 2. Wyświetlenie propozycji i zapytanie użytkownika
             print(f"\n--- PROPOZYCJA DLA PLIKU: {suggestion['path']} ---") 
             print(f"Problem: {suggestion['reason']}")
             print(f"SUGEROWANA AKCJA: **{current_suggestion}**")
             
             user_choice = get_user_choice(suggestion)
             
-            # 3. Przetworzenie wyboru użytkownika
             if user_choice.startswith('ALWAYS_'):
-                # Zapisanie akcji globalnej i wykonanie jej w obecnym przebiegu
-                action = user_choice.split('ALWAYS_')[1] # np. PERFORM lub SKIP
+                action = user_choice.split('ALWAYS_')[1]
                 global_actions[action_type] = action
                 print(f"🔥 Ustawiono akcję globalną '{action}' dla wszystkich typów '{action_type}'.")
             else:
-                action = user_choice # Akcja lokalna: PERFORM lub NO_ACTION
+                action = user_choice
         
-        # 4. Wykonanie akcji
         if action == 'PERFORM' or (action == 'ALWAYS_PERFORM'):
-             # Używamy sugerowanej akcji, bo użytkownik ją zatwierdził (Y/ALWAYS_Y)
              perform_action(suggestion, config)
         elif action == 'NO_ACTION' or (action == 'ALWAYS_SKIP'):
              print(f"➡️ POMINIĘTO: {suggestion['path']} na żądanie użytkownika.")
-             
+            
     print("\n" + "#"*60)
     print("✅ ZAKOŃCZONO FAZĘ WYKONYWANIA AKCJI.")
     print("#"*60)
     
     
 def find_files_for_final_move(directories):
-    """
-    Rekurencyjnie znajduje wszystkie pliki w podanych katalogach, które
-    mają zostać przeniesione (spłaszczone) do katalogu docelowego X.
-    """
     files_to_move = []
     print("\n🔍 Szukanie plików do finalnego przeniesienia (rekurencyjnie w podkatalogach X i wszystkich Y)...")
     
@@ -481,24 +377,20 @@ def find_files_for_final_move(directories):
             print(f"⚠️ Ścieżka {dir_path} nie jest katalogiem. Pomijam.")
             continue
             
-        print(f"    Skanowanie: {dir_path}")
+        print(f"Skanowanie: {dir_path}")
         
-        # os.walk jest rekurencyjne
         for root, _, files in os.walk(dir_path):
             current_path = Path(root)
             for file_name in files:
                 file_path = current_path / file_name
                 
-                # Zapewnienie, że nie przenosimy pliku konfiguracyjnego
                 if file_name != CONFIG_FILE.name:
                     files_to_move.append(file_path.resolve())
-                    
-    # Usuwamy duplikaty (gdyby katalogi się pokrywały) i sortujemy dla czytelności
+                        
     return sorted(list(set(files_to_move)))
 
 
-def prompt_and_move_all_files(files_to_move, target_dir):
-    """Pyta użytkownika o przeniesienie wszystkich znalezionych plików do katalogu docelowego X."""
+def prompt_and_move_all_files(files_to_move, target_dir, directories):
     
     if not files_to_move:
         print("✅ Nie znaleziono żadnych plików do finalnego przeniesienia.")
@@ -507,7 +399,7 @@ def prompt_and_move_all_files(files_to_move, target_dir):
     print("\n" + "="*60)
     print(f"⭐ OSTATNI ETAP: PRZENOSZENIE PLIKÓW (FLATTENING) DO {target_dir.name}")
     print(f"Znaleziono {len(files_to_move)} plików do przeniesienia:")
-    for f in files_to_move[:5]: # Wypisanie tylko kilku przykładów
+    for f in files_to_move[:5]:
         print(f" - {f}")
     if len(files_to_move) > 5:
         print(f" - ... (oraz {len(files_to_move) - 5} innych)")
@@ -521,16 +413,13 @@ def prompt_and_move_all_files(files_to_move, target_dir):
     print("\nRozpoczynanie przenoszenia...")
     moved_count = 0
     
-    # Lista katalogów, które mogą stać się puste i nadawać się do usunięcia
     possible_empty_dirs = set() 
     
     for file_path in files_to_move:
-        # Zapisujemy katalog źródłowy do późniejszego ewentualnego usunięcia
         source_dir = file_path.parent
         if source_dir != target_dir:
             possible_empty_dirs.add(source_dir)
             
-        # Nowa ścieżka to nazwa pliku w katalogu X
         target_path = target_dir / file_path.name
         
         try:
@@ -544,31 +433,26 @@ def prompt_and_move_all_files(files_to_move, target_dir):
             
         except Exception as e:
             print(f"❌ Błąd przenoszenia {file_path}: {e}")
+            
+    possible_empty_dirs = possible_empty_dirs | set(directories)
 
-    # Próba usunięcia pustych katalogów, z których przeniesiono pliki
     print("\nPróba usunięcia pustych katalogów źródłowych...")
     for directory in sorted(list(possible_empty_dirs), reverse=True):
         try:
-            # Użycie rmdir do usunięcia tylko pustego katalogu
             os.rmdir(directory)
             print(f"    Usunięto pusty katalog: {directory}")
         except OSError:
-            # Rmdir zgłosi błąd, jeśli katalog nie jest pusty
             pass
 
     print(f"\nOperacja zakończona. Przeniesiono {moved_count}/{len(files_to_move)} plików.")
     print("="*60)
     
 
-# --- FUNKCJA GŁÓWNA (MODYFIKACJA) ---
-
 def main():
-    """Główna funkcja programu."""
     if len(sys.argv) < 2:
         print("Użycie: python file_organizer.py <katalog_docelowy_X> <katalog_Y1> [katalog_Y2...]")
         sys.exit(1)
 
-    # Użycie funkcji z poprzedniego etapu
     target_dir = Path(sys.argv[1]).resolve()
     scan_dirs = [Path(d).resolve() for d in sys.argv[1:]]
 
@@ -579,37 +463,30 @@ def main():
     config = load_config()
     config['target_dir'] = target_dir
     
-    # Załóżmy, że wszystkie funkcje pomocnicze są zdefiniowane i działają:
-    all_files, hash_map = scan_directories(scan_dirs) # Wymaga zaimplementowania scan_directories
-    suggestions = analyze_and_suggest_actions(all_files, hash_map, config) # Wymaga zaimplementowania analyze_and_suggest_actions
+    all_files, hash_map = scan_directories(scan_dirs)
+    suggestions = analyze_and_suggest_actions(all_files, hash_map, config)
     
     SORT_ORDER = {
-        'EMPTY_FILE': 1,      # Puste pliki
-        'TEMP_FILE': 2,       # Pliki tymczasowe
-        'DUPLICATE': 3,       # Duplikaty (do usunięcia)
+        'EMPTY_FILE': 1,
+        'TEMP_FILE': 2,
+        'DUPLICATE': 3,
         'VERSION_CONFLICT': 4,
-        'RENAME': 5,          # Zmiana nazwy
-        'PERMISSIONS': 6,     # Zmiana uprawnień (CHMOD)
-        'MOVE_ORIGINAL': 7,   # Przeniesienie (organizacja)
+        'RENAME': 5,
+        'PERMISSIONS': 6,
+        'MOVE_ORIGINAL': 7,
     }
 
-    # Sortowanie propozycji na podstawie klucza zdefiniowanego w SORT_ORDER
-    # Używamy .get z wysoką wartością domyślną (99), aby nieznane typy problemów znalazły się na końcu
     suggestions.sort(key=lambda s: SORT_ORDER.get(s['type'], 99))
 
-    print_suggestions(suggestions) # Wyświetlenie wszystkich propozycji
+    print_suggestions(suggestions)
     
-    # NOWOŚĆ: Pytanie o kontynuację
     if suggestions and input("Czy chcesz rozpocząć interaktywną fazę wykonywania akcji? (Y/n): ").strip().lower() != 'n':
         execute_actions(suggestions, config)
     else:
         print("Anulowano wykonywanie akcji. Zakończenie pracy skryptu.")
         
-    # 3. NOWY ETAP: Finalna Organizacja Luźnych Plików
-    # Używamy pierwotnej listy katalogów do skanowania (scan_dirs)
     y_dirs = scan_dirs[1:]
     
-    # Podkatalogi X (jeśli istnieją, dla operacji flatten)
     try:
         x_subdirs = [p.resolve() for p in target_dir.iterdir() if p.is_dir()]
     except Exception as e:
@@ -617,9 +494,9 @@ def main():
         x_subdirs = []
 
     dirs_to_scan_for_move = x_subdirs + y_dirs
-
+    
     files_to_move = find_files_for_final_move(dirs_to_scan_for_move)
-    prompt_and_move_all_files(files_to_move, target_dir)
+    prompt_and_move_all_files(files_to_move, target_dir, dirs_to_scan_for_move)
     
     
     print("\n--- ZAKOŃCZENIE PRACY SKRYPTU ---")
