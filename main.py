@@ -36,7 +36,7 @@ def load_config():
     # Lepszym podejściem jest użycie os.chmod(..., mode) gdzie mode jest w oktalnym systemie np. 0o644
     
     return {
-        'permissions': settings.get('suggested_permissions'),
+        'permissions': symbolic_to_octal(settings.get('suggested_permissions')),
         'trouble_chars': list(settings.get('troublesome_chars')),
         'substitute': settings.get('char_substitute'),
         'temp_exts': [e.strip() for e in settings.get('temp_extensions').split(',')],
@@ -70,6 +70,41 @@ def get_file_stats(file_path):
         'permissions_octal': oct(stats.st_mode)[-3:], # np. '644' z '0o100644'
         # Reprezentacja tekstowa (rw-r--r--) wymaga bardziej złożonej funkcji
     }
+    
+def symbolic_to_octal(symbolic_permissions: str) -> str:
+    """
+    Converts a 9-character symbolic file permission string (e.g., 'rw-r--r--') 
+    to its 3-digit octal representation (e.g., '644').
+    
+    Args:
+        symbolic_permissions: The 9-character string representing permissions.
+        
+    Returns:
+        The 3-digit octal string.
+    
+    Raises:
+        ValueError: If the input string is not 9 characters long.
+    """
+    if len(symbolic_permissions) != 9:
+        raise ValueError("Permission string must be exactly 9 characters long (e.g., 'rwxr-xr--').")
+
+    # Map each permission letter to its octal value
+    permission_map = {'r': 4, 'w': 2, 'x': 1, '-': 0}
+    
+    octal_parts = []
+    
+    # Iterate through the string in groups of three (Owner, Group, Others)
+    for i in range(0, 9, 3):
+        group_permissions = symbolic_permissions[i:i+3]
+        octal_value = 0
+        
+        # Sum the values for 'r', 'w', and 'x' in the group
+        for char in group_permissions:
+            octal_value += permission_map.get(char, 0) # Use .get for safety
+            
+        octal_parts.append(str(octal_value))
+
+    return "".join(octal_parts)
 
 # --- GŁÓWNA LOGIKA SKANOWANIA I ANALIZY ---
 
@@ -220,7 +255,7 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
         
         # d) Atrybuty (uproszczone: porównanie z oktalnym stringiem)
         target_permissions_octal = config['permissions'] # Zakładając, że to pole zostanie poprawnie obliczone
-        if file_stats['permissions_octal'] != '644': # Używam 644 jako przykład
+        if file_stats['permissions_octal'] != target_permissions_octal: # Używam 644 jako przykład
             suggestions.append({
                 'type': 'PERMISSIONS',
                 'path': path,
@@ -254,41 +289,6 @@ def print_suggestions(suggestions):
             print(f" -> {s['target_path']}")
         else:
             print("")
-
-def main():
-    """Główna funkcja programu."""
-    if len(sys.argv) < 2:
-        print("Użycie: python file_organizer.py <katalog_docelowy_X> <katalog_Y1> [katalog_Y2...]")
-        sys.exit(1)
-
-    # Pierwszy argument to katalog docelowy X, reszta to Y1, Y2, ...
-    target_dir = Path(sys.argv[1]).resolve()
-    scan_dirs = [Path(d).resolve() for d in sys.argv[1:]]
-
-    if not target_dir.is_dir():
-        print(f"❌ Katalog docelowy X ({target_dir}) nie istnieje lub nie jest katalogiem.")
-        sys.exit(1)
-
-    config = load_config()
-    config['target_dir'] = target_dir
-    
-    # ⚠️ HACK: Uproszczona konwersja do celów demonstracyjnych
-    # W rzeczywistości wymaga to precyzyjnego obliczenia trybu numerycznego
-    config['permissions_octal'] = '644' 
-
-    all_files, hash_map = scan_directories(scan_dirs)
-    suggestions = analyze_and_suggest_actions(all_files, hash_map, config)
-
-    print_suggestions(suggestions)
-    
-    # --- FAZA WYKONYWANIA AKCJI (TODO) ---
-    # Tutaj powinna nastąpić interakcja z użytkownikiem i wykonanie operacji:
-    # 1. Pytanie o akcję globalną (np. "Zawsze kasuj puste pliki?")
-    # 2. Pętla przechodząca przez sugestie i pytanie o każdą akcję, chyba że akcja globalna ją nadpisuje.
-    
-    print("\n--- Koniec Analizy ---")
-    print("Faza wykonania akcji wymaga implementacji interaktywnego wyboru użytkownika.")
-
 
 def perform_action(suggestion, config):
     """Wykonuje konkretną akcję na pliku i zwraca status operacji."""
