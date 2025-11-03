@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 # --- KONFIGURACJA ---
-CONFIG_FILE = Path.home() / ".clean_files"
+CONFIG_FILE = Path(".clean_files")
 
 def load_config():
     """Wczytuje parametry z pliku konfiguracyjnego."""
@@ -304,6 +304,48 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
                         'reason': f"Starsza wersja pliku. Nowszy plik (oryginał?) z: {time.ctime(newest_file['mtime'])} jest w {newest_file['path']}",
                         'target_path': None
                     })
+                    
+    # 4. Przeniesienie (ORGANIZACJA): Przenosi wszystkie pozostałe pliki do X
+    for file_stats in all_files:
+        path = file_stats['path']
+        
+        # Sprawdzenie, czy plik nie został już oznaczony do skasowania, zmiany nazwy lub przeniesienia
+        is_already_scheduled = any(s['path'] == path for s in suggestions)
+        
+        # Jeśli plik znajduje się w katalogu X lub jest w jakikolwiek sposób 
+        # już ujęty w sugestiach, pomijamy go.
+        if is_already_scheduled:
+            continue
+            
+        # Sprawdzenie, czy plik JEST JUŻ w katalogu docelowym X
+        # Używamy path.resolve() dla bezpieczeństwa, by porównać absolutne ścieżki
+        if path.resolve().parent == config['target_dir'].resolve():
+            continue
+
+        # Generowanie nowej ścieżki w katalogu X (zachowujemy tylko nazwę pliku)
+        new_path = config['target_dir'] / path.name
+        
+        # Sprawdzamy, czy plik o docelowej nazwie już nie istnieje.
+        # Jeśli tak, to jest to prawdziwy konflikt nazw, który może wymagać ręcznej 
+        # interwencji lub logiki dodającej np. '_conflict'.
+        if new_path.exists():
+            suggestions.append({
+                'type': 'MOVE_CONFLICT',
+                'path': path,
+                'suggestion': 'NO_ACTION', # Opcja ręcznej decyzji
+                'reason': f"Konflikt nazwy: Cel '{new_path.name}' już istnieje w X.",
+                'target_path': new_path
+            })
+            continue
+
+        # Jeśli nie jest w X i nie jest zaplanowany do innej akcji, przenosimy go
+        suggestions.append({
+            'type': 'FINAL_MOVE',
+            'path': path,
+            'suggestion': 'MOVE_TO_X',
+            'reason': f"Katalog docelowy X (organizacja).",
+            'target_path': new_path
+        })
     
     return suggestions
 
@@ -498,6 +540,8 @@ def main():
         'RENAME': 5,          # Zmiana nazwy
         'PERMISSIONS': 6,     # Zmiana uprawnień (CHMOD)
         'MOVE_ORIGINAL': 7,   # Przeniesienie (organizacja)
+        'MOVE_CONFLICT': 8,   # Konflikt nazwy (warto sprawdzić, co z tym zrobić)
+        'FINAL_MOVE': 9,  # Przeniesienie wszystkich pozostałych (Nowość)
     }
 
     # Sortowanie propozycji na podstawie klucza zdefiniowanego w SORT_ORDER

@@ -1,0 +1,6 @@
+[Settings]
+suggested_permissions = rw-r--r--
+troublesome_chars = :;*?"$#`|\.
+char_substitute = _
+temp_extensions = .tmp,~,.bak,.DS_Store
+
