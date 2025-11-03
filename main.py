@@ -1,0 +1,460 @@
+import os
+import sys
+import hashlib
+import configparser
+import shutil
+from pathlib import Path
+
+# --- KONFIGURACJA ---
+CONFIG_FILE = Path.home() / ".clean_files"
+
+def load_config():
+    """Wczytuje parametry z pliku konfiguracyjnego."""
+    config = configparser.ConfigParser()
+    
+    # Ustawienie wartości domyślnych na wypadek braku pliku konfiguracyjnego
+    config['Settings'] = {
+        'suggested_permissions': 'rw-r--r--',
+        'troublesome_chars': ':;*?"$#`|\\.', # Znak \ wymaga podwójnego zescrapowania w stringu
+        'char_substitute': '_',
+        'temp_extensions': '.tmp,~,.bak,.DS_Store',
+    }
+    
+    if not CONFIG_FILE.exists():
+        print(f"⚠️ Uwaga: Nie znaleziono pliku konfiguracyjnego: {CONFIG_FILE}")
+        # Można zapisać domyślny plik, by ułatwić edycję
+        with open(CONFIG_FILE, 'w') as f:
+            config.write(f)
+        print(f"   Utworzono domyślny plik konfiguracyjny. Używam wartości domyślnych.")
+    else:
+        config.read(CONFIG_FILE)
+
+    settings = config['Settings']
+    
+    # Konwersja formatu 'rw-r--r--' na tryb numeryczny (chmod)
+    # To jest złożony proces, dlatego dla uproszczenia w skrypcie będziemy porównywać z formatem tekstowym
+    # Lepszym podejściem jest użycie os.chmod(..., mode) gdzie mode jest w oktalnym systemie np. 0o644
+    
+    return {
+        'permissions': settings.get('suggested_permissions'),
+        'trouble_chars': list(settings.get('troublesome_chars')),
+        'substitute': settings.get('char_substitute'),
+        'temp_exts': [e.strip() for e in settings.get('temp_extensions').split(',')],
+        'target_dir': None # Docelowy katalog X - będzie ustawiony z argumentów
+    }
+
+# --- NARZĘDZIA PLIKOWE ---
+
+def calculate_hash(file_path, algorithm='sha256'):
+    """Oblicza sumę kontrolną pliku o dużym rozmiarze."""
+    hasher = hashlib.new(algorithm)
+    try:
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(4096):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception as e:
+        # Prawa dostępu, błąd odczytu itp.
+        return f"ERROR: {e}"
+
+def get_file_stats(file_path):
+    """Pobiera statystyki pliku: rozmiar, datę modyfikacji/utworzenia i uprawnienia."""
+    stats = file_path.stat()
+    return {
+        'path': file_path,
+        'size': stats.st_size,
+        # Najczęściej data modyfikacji (mtime) i/lub data utworzenia (ctime)
+        # Używamy mtime do wersji, ctime (lub birthtime na niektórych OS) do duplikatów.
+        'mtime': stats.st_mtime, 
+        'ctime': stats.st_ctime, 
+        'permissions_octal': oct(stats.st_mode)[-3:], # np. '644' z '0o100644'
+        # Reprezentacja tekstowa (rw-r--r--) wymaga bardziej złożonej funkcji
+    }
+
+# --- GŁÓWNA LOGIKA SKANOWANIA I ANALIZY ---
+
+def scan_directories(directories):
+    """
+    Skanuje podane katalogi i gromadzi informacje o wszystkich plikach.
+    Zwraca: (lista_plików, mapa_hashy)
+    """
+    all_files = []
+    hash_map = {} # { hash: [ {stats1}, {stats2}, ... ] }
+
+    for dir_path in directories:
+        print(f"🔎 Skanowanie katalogu: {dir_path}")
+        
+        # os.walk jest niezawodne do rekurencyjnego przechodzenia drzewa
+        for root, _, files in os.walk(dir_path):
+            for file_name in files:
+                file_path = Path(root) / file_name
+                
+                # Użycie try-except do obsługi plików bez praw dostępu
+                try:
+                    stats = get_file_stats(file_path)
+                    
+                    # 1. Obliczanie hasha
+                    file_hash = calculate_hash(file_path)
+                    
+                    stats['hash'] = file_hash
+                    all_files.append(stats)
+                    
+                    # 2. Mapowanie hashy
+                    if file_hash not in hash_map:
+                        hash_map[file_hash] = []
+                    hash_map[file_hash].append(stats)
+                    
+                except Exception as e:
+                    print(f"🚫 Błąd dostępu/statystyk dla {file_path}: {e}")
+                    continue
+                    
+    return all_files, hash_map
+
+def analyze_and_suggest_actions(all_files, hash_map, config):
+    """Analizuje zebrane dane i generuje listę proponowanych akcji."""
+    suggestions = []
+    
+    # 1. Duplikaty (identyczna zawartość)
+    for file_hash, file_list in hash_map.items():
+        if "ERROR" in file_hash:
+             continue # Pomijamy pliki, których nie udało się zahaszować
+
+        if file_list[0]['size'] == 0:
+            # Puste pliki zostaną obsłużone w kroku 2
+            continue
+            
+        if len(file_list) > 1:
+            # Wiele plików z tym samym hashem = duplikaty
+            
+            # Wyszukanie najstarszego pliku (wg. daty utworzenia/ctime)
+            # Najstarsza data to najmniejsza wartość timestamp
+            original_file = min(file_list, key=lambda x: x['ctime'])
+            
+            for file_stats in file_list:
+                if file_stats['path'] != original_file['path']:
+                    suggestions.append({
+                        'type': 'DUPLICATE',
+                        'path': file_stats['path'],
+                        'suggestion': 'DELETE',
+                        'reason': f"Identyczna zawartość ({file_hash}). Oryginał: {original_file['path']}",
+                        'target_path': None
+                    })
+                # Jeśli to jest oryginalny plik, ale nie jest w katalogu X (target_dir)
+                elif not str(original_file['path']).startswith(str(config['target_dir'])):
+                    new_path = config['target_dir'] / original_file['path'].name
+                    suggestions.append({
+                        'type': 'MOVE_ORIGINAL',
+                        'path': original_file['path'],
+                        'suggestion': 'MOVE_TO_X',
+                        'reason': f"Oryginalny plik ({file_hash}) powinien znaleźć się w X.",
+                        'target_path': new_path
+                    })
+
+
+    # 2. Puste pliki, pliki tymczasowe, kłopotliwe nazwy i atrybuty
+    for file_stats in all_files:
+        path = file_stats['path']
+        
+        # Sprawdzanie, czy plik nie jest już oznaczony jako duplikat do skasowania
+        if any(s['path'] == path and s['suggestion'] == 'DELETE' for s in suggestions):
+            continue
+
+        # a) Pliki puste
+        if file_stats['size'] == 0:
+            suggestions.append({
+                'type': 'EMPTY_FILE',
+                'path': path,
+                'suggestion': 'DELETE',
+                'reason': 'Plik pusty (rozmiar = 0)',
+                'target_path': None
+            })
+            continue
+
+        # b) Pliki tymczasowe
+        if path.suffix in config['temp_exts'] or any(path.name.endswith(ext) for ext in config['temp_exts']):
+            suggestions.append({
+                'type': 'TEMP_FILE',
+                'path': path,
+                'suggestion': 'DELETE',
+                'reason': f"Plik tymczasowy ({path.suffix})",
+                'target_path': None
+            })
+            continue
+
+        # c) Kłopotliwe nazwy
+        new_name = path.name
+        needs_rename = False
+        for char in config['trouble_chars']:
+            if char in new_name:
+                new_name = new_name.replace(char, config['substitute'])
+                needs_rename = True
+        
+        if needs_rename:
+            new_path = path.parent / new_name
+            suggestions.append({
+                'type': 'RENAME',
+                'path': path,
+                'suggestion': 'RENAME',
+                'reason': f"Nazwa zawiera kłopotliwe znaki. Sugerowana nazwa: {new_name}",
+                'target_path': new_path
+            })
+        
+        # d) Atrybuty (uproszczone: porównanie z oktalnym stringiem)
+        target_permissions_octal = config['permissions_octal'] # Zakładając, że to pole zostanie poprawnie obliczone
+        if file_stats['permissions_octal'] != '644': # Używam 644 jako przykład
+            suggestions.append({
+                'type': 'PERMISSIONS',
+                'path': path,
+                'suggestion': 'CHMOD',
+                'reason': f"Niepoprawne uprawnienia: {file_stats['permissions_octal']}. Sugerowane: 644",
+                'target_path': None
+            })
+
+    # 3. Nowsze wersje (plik o tej samej nazwie, inna zawartość) - Bardzo trudne do automatycznej decyzji!
+    # Ta logika wymagałaby grupowania plików nie po hashu, ale po samej nazwie bazowej.
+    # Wymagałoby to stworzenia dodatkowej mapy { file_name: [stats1, stats2, ...] }
+    
+    return suggestions
+
+def print_suggestions(suggestions):
+    """Wyświetla propozycje akcji w czytelnej formie."""
+    print("\n" + "="*50)
+    print("📋 PODSUMOWANIE PROPOZYCJI PORZĄDKOWANIA")
+    print("="*50)
+
+    if not suggestions:
+        print("🎉 Nie znaleziono żadnych problemów. Pliki są uporządkowane!")
+        return
+
+    for i, s in enumerate(suggestions):
+        print(f"\n--- Akcja {i+1} ({s['type']}) ---")
+        print(f"Plik:       {s['path']}")
+        print(f"Problem:    {s['reason']}")
+        print(f"SUGESTIA:   **{s['suggestion']}**", end="")
+        if s['target_path']:
+            print(f" -> {s['target_path']}")
+        else:
+            print("")
+
+def main():
+    """Główna funkcja programu."""
+    if len(sys.argv) < 2:
+        print("Użycie: python file_organizer.py <katalog_docelowy_X> <katalog_Y1> [katalog_Y2...]")
+        sys.exit(1)
+
+    # Pierwszy argument to katalog docelowy X, reszta to Y1, Y2, ...
+    target_dir = Path(sys.argv[1]).resolve()
+    scan_dirs = [Path(d).resolve() for d in sys.argv[1:]]
+
+    if not target_dir.is_dir():
+        print(f"❌ Katalog docelowy X ({target_dir}) nie istnieje lub nie jest katalogiem.")
+        sys.exit(1)
+
+    config = load_config()
+    config['target_dir'] = target_dir
+    
+    # ⚠️ HACK: Uproszczona konwersja do celów demonstracyjnych
+    # W rzeczywistości wymaga to precyzyjnego obliczenia trybu numerycznego
+    config['permissions_octal'] = '644' 
+
+    all_files, hash_map = scan_directories(scan_dirs)
+    suggestions = analyze_and_suggest_actions(all_files, hash_map, config)
+
+    print_suggestions(suggestions)
+    
+    # --- FAZA WYKONYWANIA AKCJI (TODO) ---
+    # Tutaj powinna nastąpić interakcja z użytkownikiem i wykonanie operacji:
+    # 1. Pytanie o akcję globalną (np. "Zawsze kasuj puste pliki?")
+    # 2. Pętla przechodząca przez sugestie i pytanie o każdą akcję, chyba że akcja globalna ją nadpisuje.
+    
+    print("\n--- Koniec Analizy ---")
+    print("Faza wykonania akcji wymaga implementacji interaktywnego wyboru użytkownika.")
+
+
+def perform_action(suggestion, config):
+    """Wykonuje konkretną akcję na pliku i zwraca status operacji."""
+    path = suggestion['path']
+    action = suggestion['suggestion']
+    target = suggestion.get('target_path')
+    
+    try:
+        if action == 'DELETE':
+            os.remove(path)
+            print(f"✅ USUNIĘTO: {path}")
+            return True
+            
+        elif action == 'MOVE_TO_X':
+            # Używamy shutil.move, które obsługuje przenoszenie między systemami plików
+            # Ważne: Tworzymy docelowy katalog, jeśli nie istnieje
+            if target:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(path, target)
+                print(f"✅ PRZENIESIONO: {path} -> {target}")
+                return True
+            
+        elif action == 'RENAME':
+            if target:
+                path.rename(target) # rename działa także jako move, ale w obrębie tego samego FS
+                print(f"✅ ZMIENIONO NAZWĘ: {path.name} -> {target.name}")
+                return True
+                
+        elif action == 'CHMOD':
+            # Zmiana uprawnień na wartość z konfiguracji
+            os.chmod(path, config['permissions_octal'])
+            print(f"✅ ZMIENIONO PRAW: {path} na {oct(config['permissions_octal'])[-3:]}")
+            return True
+            
+        elif action == 'NO_ACTION':
+            print(f"➡️ POMINIĘTO: {path}")
+            return True
+            
+        else:
+            print(f"❓ NIEZNANA AKCJA: {action} dla {path}")
+            return False
+
+    except FileNotFoundError:
+        print(f"❌ BŁĄD: Plik nie istnieje ({path}). Prawdopodobnie już usunięty/przeniesiony.")
+        return False
+    except PermissionError:
+        print(f"❌ BŁĄD: Brak uprawnień do wykonania akcji na {path}.")
+        return False
+    except Exception as e:
+        print(f"❌ BŁĄD WYKONANIA: {e}")
+        return False
+
+
+def get_user_choice(suggestion):
+    """Pyta użytkownika o akcję i zwraca wybrany tryb."""
+    
+    # Dostępne akcje bazujące na sugestii
+    action_map = {
+        'DELETE': ['k', 'kasuj'],
+        'MOVE_TO_X': ['p', 'przenieś'],
+        'RENAME': ['z', 'zmień'],
+        'CHMOD': ['a', 'atrybut'],
+        'NO_ACTION': ['o', 'ominiń']
+    }
+    
+    # Mapowanie dla akcji globalnych (wykonywanych na wszystkich problemach danego typu)
+    global_map = {
+        'k': 'ALWAYS_DELETE',
+        'p': 'ALWAYS_MOVE',
+        'z': 'ALWAYS_RENAME',
+        'a': 'ALWAYS_CHMOD',
+        'o': 'ALWAYS_SKIP'
+    }
+
+    prompt = (
+        f"Akcja dla {suggestion['path'].name} ({suggestion['suggestion']})? "
+        f"[K]asuj/{action_map['DELETE'][0]}, [P]rzenieś/{action_map['MOVE_TO_X'][0]}, "
+        f"[Z]mień_nazwę/{action_map['RENAME'][0]}, [O]miń/{action_map['NO_ACTION'][0]}, "
+        f"[A]trybuty/{action_map['CHMOD'][0]} lub [G]lobalnie (wszystkie tego typu): "
+    )
+    
+    while True:
+        try:
+            choice = input(prompt).strip().lower()
+            if not choice:
+                continue
+
+            # Sprawdzenie, czy to akcja globalna (G)
+            if choice == 'g':
+                global_action = input("Wybierz akcję globalną dla typu problemu: [K/P/Z/A/O]: ").strip().lower()
+                if global_action in global_map:
+                    return global_map[global_action]
+                else:
+                    print("Nieznana akcja globalna.")
+                    continue
+            
+            # Sprawdzenie, czy to akcja lokalna
+            for action_name, keywords in action_map.items():
+                if choice in keywords:
+                    return action_name
+
+            print("Nieznana opcja. Spróbuj ponownie.")
+        except EOFError:
+            return 'NO_ACTION' # Zapobiega przerwaniu w trybie skryptowym
+            
+
+def execute_actions(suggestions, config):
+    """
+    Interaktywny przebieg pętli akcji.
+    """
+    print("\n" + "#"*60)
+    print("🤖 START FAZY WYKONYWANIA AKCJI (Interaktywny)")
+    print("#"*60)
+    
+    # Słownik do przechowywania akcji globalnych dla każdego typu problemu
+    global_actions = {} 
+    
+    for suggestion in suggestions:
+        action_type = suggestion['type']
+        current_suggestion = suggestion['suggestion']
+        
+        # 1. Sprawdzenie, czy dla tego typu problemu zdefiniowano akcję globalną
+        if action_type in global_actions:
+            action = global_actions[action_type]
+            print(f"⚡ Globalna akcja ({action}) dla typu {action_type}.")
+        else:
+            # 2. Wyświetlenie propozycji i zapytanie użytkownika
+            print(f"\n--- PROPOZYCJA DLA PLIKU: {suggestion['path'].name} ---")
+            print(f"Problem: {suggestion['reason']}")
+            print(f"Sugerowana akcja: {current_suggestion}")
+            
+            user_choice = get_user_choice(suggestion)
+            
+            # 3. Przetworzenie wyboru użytkownika
+            if user_choice.startswith('ALWAYS_'):
+                # Zapisanie akcji globalnej i wykonanie jej w obecnym przebiegu
+                action = user_choice.split('ALWAYS_')[1]
+                global_actions[action_type] = action
+                print(f"🔥 Ustawiono akcję globalną '{action}' dla wszystkich typów '{action_type}'.")
+            else:
+                action = user_choice # Akcja lokalna
+        
+        # 4. Nadpisanie sugestii i wykonanie
+        if action != 'NO_ACTION':
+             # Należy zaktualizować pole suggestion, bo użytkownik mógł wybrać inną akcję niż sugerowana
+             suggestion['suggestion'] = action 
+             perform_action(suggestion, config)
+        else:
+             print(f"➡️ POMINIĘTO: {suggestion['path']}")
+             
+    print("\n" + "#"*60)
+    print("✅ ZAKOŃCZONO FAZĘ WYKONYWANIA AKCJI.")
+    print("#"*60)
+
+# --- FUNKCJA GŁÓWNA (MODYFIKACJA) ---
+
+def main():
+    """Główna funkcja programu."""
+    if len(sys.argv) < 2:
+        print("Użycie: python file_organizer.py <katalog_docelowy_X> <katalog_Y1> [katalog_Y2...]")
+        sys.exit(1)
+
+    # Użycie funkcji z poprzedniego etapu
+    target_dir = Path(sys.argv[1]).resolve()
+    scan_dirs = [Path(d).resolve() for d in sys.argv[1:]]
+
+    if not target_dir.is_dir():
+        print(f"❌ Katalog docelowy X ({target_dir}) nie istnieje lub nie jest katalogiem.")
+        sys.exit(1)
+
+    config = load_config()
+    config['target_dir'] = target_dir
+    
+    # Załóżmy, że wszystkie funkcje pomocnicze są zdefiniowane i działają:
+    all_files, hash_map = scan_directories(scan_dirs) # Wymaga zaimplementowania scan_directories
+    suggestions = analyze_and_suggest_actions(all_files, hash_map, config) # Wymaga zaimplementowania analyze_and_suggest_actions
+
+    print_suggestions(suggestions) # Wyświetlenie wszystkich propozycji
+    
+    # NOWOŚĆ: Pytanie o kontynuację
+    if suggestions and input("Czy chcesz rozpocząć interaktywną fazę wykonywania akcji? (t/n): ").strip().lower() == 't':
+        execute_actions(suggestions, config)
+    else:
+        print("Anulowano wykonywanie akcji. Zakończenie pracy skryptu.")
+
+
+if __name__ == "__main__":
+    main()
