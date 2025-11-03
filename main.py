@@ -3,6 +3,7 @@ import sys
 import hashlib
 import configparser
 import shutil
+import time
 from pathlib import Path
 
 # --- KONFIGURACJA ---
@@ -15,7 +16,7 @@ def load_config():
     # Ustawienie wartości domyślnych na wypadek braku pliku konfiguracyjnego
     config['Settings'] = {
         'suggested_permissions': 'rw-r--r--',
-        'troublesome_chars': ':;*?"$#`|\\.', # Znak \ wymaga podwójnego zescrapowania w stringu
+        'troublesome_chars': ':;*?"$#`|\\.', 
         'char_substitute': '_',
         'temp_extensions': '.tmp,~,.bak,.DS_Store',
     }
@@ -149,6 +150,13 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
     """Analizuje zebrane dane i generuje listę proponowanych akcji."""
     suggestions = []
     
+    name_map = {}
+    for file_stats in all_files:
+        filename = file_stats['path'].name
+        if filename not in name_map:
+            name_map[filename] = []
+        name_map[filename].append(file_stats)
+    
     # 1. Duplikaty (identyczna zawartość)
     for file_hash, file_list in hash_map.items():
         if "ERROR" in file_hash:
@@ -265,8 +273,37 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
             })
 
     # 3. Nowsze wersje (plik o tej samej nazwie, inna zawartość) - Bardzo trudne do automatycznej decyzji!
-    # Ta logika wymagałaby grupowania plików nie po hashu, ale po samej nazwie bazowej.
-    # Wymagałoby to stworzenia dodatkowej mapy { file_name: [stats1, stats2, ...] }
+    for file_name, file_list in name_map.items():
+            # Pomijamy grupy z jednym plikiem
+            if len(file_list) <= 1:
+                continue
+                
+            # Sprawdzenie, czy wszystkie pliki są faktycznie identyczne (ten sam hash). 
+            all_same_hash = all(f['hash'] == file_list[0]['hash'] for f in file_list)
+            
+            if not all_same_hash:
+                # To są różne wersje pliku o tej samej nazwie (konflikt nazw, różna treść)
+                
+                # Uporządkowanie według daty modyfikacji (mtime), najnowszy jest na początku (reverse=True)
+                file_list.sort(key=lambda x: x['mtime'], reverse=True)
+                newest_file = file_list[0]
+                
+                # Pominięcie najnowszego pliku i sugerowanie usunięcia starszych
+                for file_stats in file_list[1:]:
+                    path = file_stats['path']
+                    
+                    # Sprawdzenie, czy plik nie jest już oznaczony do usunięcia
+                    if any(s['path'] == path and s['suggestion'] == 'DELETE' for s in suggestions):
+                        continue
+                        
+                    suggestions.append({
+                        'type': 'VERSION_CONFLICT',
+                        'path': path,
+                        # Użycie DELETE jako sugestii
+                        'suggestion': 'DELETE', 
+                        'reason': f"Starsza wersja pliku. Nowszy plik (oryginał?) z: {time.ctime(newest_file['mtime'])} jest w {newest_file['path']}",
+                        'target_path': None
+                    })
     
     return suggestions
 
@@ -457,9 +494,10 @@ def main():
         'EMPTY_FILE': 1,      # Puste pliki
         'TEMP_FILE': 2,       # Pliki tymczasowe
         'DUPLICATE': 3,       # Duplikaty (do usunięcia)
-        'RENAME': 4,          # Zmiana nazwy
-        'PERMISSIONS': 5,     # Zmiana uprawnień (CHMOD)
-        'MOVE_ORIGINAL': 6,   # Przeniesienie (organizacja)
+        'VERSION_CONFLICT': 4,
+        'RENAME': 5,          # Zmiana nazwy
+        'PERMISSIONS': 6,     # Zmiana uprawnień (CHMOD)
+        'MOVE_ORIGINAL': 7,   # Przeniesienie (organizacja)
     }
 
     # Sortowanie propozycji na podstawie klucza zdefiniowanego w SORT_ORDER
