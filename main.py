@@ -453,8 +453,8 @@ def main():
     suggestions = analyze_and_suggest_actions(all_files, hash_map, config) # Wymaga zaimplementowania analyze_and_suggest_actions
     
     SORT_ORDER = {
-        'TEMP_FILE': 1,       # Pliki tymczasowe
-        'EMPTY_FILE': 2,      # Puste pliki
+        'EMPTY_FILE': 1,      # Puste pliki
+        'TEMP_FILE': 2,       # Pliki tymczasowe
         'DUPLICATE': 3,       # Duplikaty (do usunięcia)
         'RENAME': 4,          # Zmiana nazwy
         'PERMISSIONS': 5,     # Zmiana uprawnień (CHMOD)
