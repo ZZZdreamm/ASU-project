@@ -507,7 +507,7 @@ def main():
     print_suggestions(suggestions) # Wyświetlenie wszystkich propozycji
     
     # NOWOŚĆ: Pytanie o kontynuację
-    if suggestions and input("Czy chcesz rozpocząć interaktywną fazę wykonywania akcji? (t/n): ").strip().lower() == 't':
+    if suggestions and input("Czy chcesz rozpocząć interaktywną fazę wykonywania akcji? (Y/n): ").strip().lower() != 'n':
         execute_actions(suggestions, config)
     else:
         print("Anulowano wykonywanie akcji. Zakończenie pracy skryptu.")
