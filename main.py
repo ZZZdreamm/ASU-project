@@ -234,7 +234,7 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
 
 def print_suggestions(suggestions):
     print("\n" + "="*50)
-    print("📋 PODSUMOWANIE PROPOZYCJI PORZĄDKOWANIA")
+    print("PODSUMOWANIE PROPOZYCJI PORZĄDKOWANIA")
     print("="*50)
 
     if not suggestions:
@@ -243,9 +243,9 @@ def print_suggestions(suggestions):
 
     for i, s in enumerate(suggestions):
         print(f"\n--- Akcja {i+1} ({s['type']}) ---")
-        print(f"Plik:       {s['path']}")
-        print(f"Problem:    {s['reason']}")
-        print(f"SUGESTIA:   **{s['suggestion']}**", end="")
+        print(f"Plik:       {s['path']}")
+        print(f"Problem:    {s['reason']}")
+        print(f"SUGESTIA:   **{s['suggestion']}**", end="")
         if s['target_path']:
             print(f" -> {s['target_path']}")
         else:
@@ -286,7 +286,7 @@ def perform_action(suggestion, config):
             return True
             
         else:
-            print(f"❓ NIEZNANA AKCJA: {action} dla {path}")
+            print(f"NIEZNANA AKCJA: {action} dla {path}")
             return False
 
     except FileNotFoundError:
@@ -311,9 +311,9 @@ def get_user_choice(suggestion):
         try:
             choice = input(prompt).strip().lower()
             
-            if choice in ['y', 'yes']:
+            if choice == 'y':
                 return 'PERFORM'
-            elif choice in ['n', 'no']:
+            elif choice == 'n':
                 return 'NO_ACTION'
             elif choice == 'g':
                 global_choice = input(f"Zastosować akcję '{action}' globalnie (Y) czy pomijać globalnie (N)? [Y/N]: ").strip().lower()
@@ -332,7 +332,7 @@ def get_user_choice(suggestion):
 
 def execute_actions(suggestions, config):
     print("\n" + "#"*60)
-    print("🤖 START FAZY WYKONYWANIA AKCJI (Interaktywny)")
+    print("🤖 START FAZY WYKONYWANIA AKCJI")
     print("#"*60)
     
     global_actions = {} 
@@ -343,7 +343,7 @@ def execute_actions(suggestions, config):
         
         if action_type in global_actions:
             action = global_actions[action_type]
-            print(f"⚡ Globalna akcja: {action} dla typu {action_type}.")
+            print(f"Globalna akcja: {action} dla typu {action_type}.")
         else:
             print(f"\n--- PROPOZYCJA DLA PLIKU: {suggestion['path']} ---") 
             print(f"Problem: {suggestion['reason']}")
@@ -361,7 +361,7 @@ def execute_actions(suggestions, config):
         if action == 'PERFORM' or (action == 'ALWAYS_PERFORM'):
              perform_action(suggestion, config)
         elif action == 'NO_ACTION' or (action == 'ALWAYS_SKIP'):
-             print(f"➡️ POMINIĘTO: {suggestion['path']} na żądanie użytkownika.")
+             print(f"POMINIĘTO: {suggestion['path']} na żądanie użytkownika.")
             
     print("\n" + "#"*60)
     print("✅ ZAKOŃCZONO FAZĘ WYKONYWANIA AKCJI.")
@@ -397,7 +397,7 @@ def prompt_and_move_all_files(files_to_move, target_dir, directories):
         return
 
     print("\n" + "="*60)
-    print(f"⭐ OSTATNI ETAP: PRZENOSZENIE PLIKÓW (FLATTENING) DO {target_dir.name}")
+    print(f"OSTATNI ETAP: PRZENOSZENIE PLIKÓW DO {target_dir.name}")
     print(f"Znaleziono {len(files_to_move)} plików do przeniesienia:")
     for f in files_to_move[:5]:
         print(f" - {f}")
@@ -440,7 +440,7 @@ def prompt_and_move_all_files(files_to_move, target_dir, directories):
     for directory in sorted(list(possible_empty_dirs), reverse=True):
         try:
             os.rmdir(directory)
-            print(f"    Usunięto pusty katalog: {directory}")
+            print(f"Usunięto pusty katalog: {directory}")
         except OSError:
             pass
 
@@ -450,7 +450,7 @@ def prompt_and_move_all_files(files_to_move, target_dir, directories):
 
 def main():
     if len(sys.argv) < 2:
-        print("Użycie: python file_organizer.py <katalog_docelowy_X> <katalog_Y1> [katalog_Y2...]")
+        print("Użycie: pytho3 main.py <katalog_docelowy_X> <katalog_Y1> [katalog_Y2...]")
         sys.exit(1)
 
     target_dir = Path(sys.argv[1]).resolve()
@@ -480,23 +480,24 @@ def main():
 
     print_suggestions(suggestions)
     
-    if suggestions and input("Czy chcesz rozpocząć interaktywną fazę wykonywania akcji? (Y/n): ").strip().lower() != 'n':
+    if suggestions and input("Czy chcesz rozpocząć fazę wykonywania akcji? (Y/n): ").strip().lower() == 'y':
         execute_actions(suggestions, config)
+        y_dirs = scan_dirs[1:]
+    
+        try:
+            x_subdirs = [p.resolve() for p in target_dir.iterdir() if p.is_dir()]
+        except Exception as e:
+            print(f"Błąd odczytu podkatalogów X: {e}. Traktuję listę jako pustą.")
+            x_subdirs = []
+
+        dirs_to_scan_for_move = x_subdirs + y_dirs
+        
+        files_to_move = find_files_for_final_move(dirs_to_scan_for_move)
+        prompt_and_move_all_files(files_to_move, target_dir, dirs_to_scan_for_move)
     else:
         print("Anulowano wykonywanie akcji. Zakończenie pracy skryptu.")
         
-    y_dirs = scan_dirs[1:]
-    
-    try:
-        x_subdirs = [p.resolve() for p in target_dir.iterdir() if p.is_dir()]
-    except Exception as e:
-        print(f"Błąd odczytu podkatalogów X: {e}. Traktuję listę jako pustą.")
-        x_subdirs = []
-
-    dirs_to_scan_for_move = x_subdirs + y_dirs
-    
-    files_to_move = find_files_for_final_move(dirs_to_scan_for_move)
-    prompt_and_move_all_files(files_to_move, target_dir, dirs_to_scan_for_move)
+   
     
     
     print("\n--- ZAKOŃCZENIE PRACY SKRYPTU ---")
