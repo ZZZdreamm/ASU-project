@@ -305,48 +305,6 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
                         'target_path': None
                     })
                     
-    # 4. Przeniesienie (ORGANIZACJA): Przenosi wszystkie pozostałe pliki do X
-    for file_stats in all_files:
-        path = file_stats['path']
-        
-        # Sprawdzenie, czy plik nie został już oznaczony do skasowania, zmiany nazwy lub przeniesienia
-        is_already_scheduled = any(s['path'] == path for s in suggestions)
-        
-        # Jeśli plik znajduje się w katalogu X lub jest w jakikolwiek sposób 
-        # już ujęty w sugestiach, pomijamy go.
-        if is_already_scheduled:
-            continue
-            
-        # Sprawdzenie, czy plik JEST JUŻ w katalogu docelowym X
-        # Używamy path.resolve() dla bezpieczeństwa, by porównać absolutne ścieżki
-        if path.resolve().parent == config['target_dir'].resolve():
-            continue
-
-        # Generowanie nowej ścieżki w katalogu X (zachowujemy tylko nazwę pliku)
-        new_path = config['target_dir'] / path.name
-        
-        # Sprawdzamy, czy plik o docelowej nazwie już nie istnieje.
-        # Jeśli tak, to jest to prawdziwy konflikt nazw, który może wymagać ręcznej 
-        # interwencji lub logiki dodającej np. '_conflict'.
-        if new_path.exists():
-            suggestions.append({
-                'type': 'MOVE_CONFLICT',
-                'path': path,
-                'suggestion': 'NO_ACTION', # Opcja ręcznej decyzji
-                'reason': f"Konflikt nazwy: Cel '{new_path.name}' już istnieje w X.",
-                'target_path': new_path
-            })
-            continue
-
-        # Jeśli nie jest w X i nie jest zaplanowany do innej akcji, przenosimy go
-        suggestions.append({
-            'type': 'FINAL_MOVE',
-            'path': path,
-            'suggestion': 'MOVE_TO_X',
-            'reason': f"Katalog docelowy X (organizacja).",
-            'target_path': new_path
-        })
-    
     return suggestions
 
 def print_suggestions(suggestions):
@@ -508,6 +466,99 @@ def execute_actions(suggestions, config):
     print("\n" + "#"*60)
     print("✅ ZAKOŃCZONO FAZĘ WYKONYWANIA AKCJI.")
     print("#"*60)
+    
+    
+def find_files_for_final_move(directories):
+    """
+    Rekurencyjnie znajduje wszystkie pliki w podanych katalogach, które
+    mają zostać przeniesione (spłaszczone) do katalogu docelowego X.
+    """
+    files_to_move = []
+    print("\n🔍 Szukanie plików do finalnego przeniesienia (rekurencyjnie w podkatalogach X i wszystkich Y)...")
+    
+    for dir_path in directories:
+        if not dir_path.is_dir():
+            print(f"⚠️ Ścieżka {dir_path} nie jest katalogiem. Pomijam.")
+            continue
+            
+        print(f"    Skanowanie: {dir_path}")
+        
+        # os.walk jest rekurencyjne
+        for root, _, files in os.walk(dir_path):
+            current_path = Path(root)
+            for file_name in files:
+                file_path = current_path / file_name
+                
+                # Zapewnienie, że nie przenosimy pliku konfiguracyjnego
+                if file_name != CONFIG_FILE.name:
+                    files_to_move.append(file_path.resolve())
+                    
+    # Usuwamy duplikaty (gdyby katalogi się pokrywały) i sortujemy dla czytelności
+    return sorted(list(set(files_to_move)))
+
+
+def prompt_and_move_all_files(files_to_move, target_dir):
+    """Pyta użytkownika o przeniesienie wszystkich znalezionych plików do katalogu docelowego X."""
+    
+    if not files_to_move:
+        print("✅ Nie znaleziono żadnych plików do finalnego przeniesienia.")
+        return
+
+    print("\n" + "="*60)
+    print(f"⭐ OSTATNI ETAP: PRZENOSZENIE PLIKÓW (FLATTENING) DO {target_dir.name}")
+    print(f"Znaleziono {len(files_to_move)} plików do przeniesienia:")
+    for f in files_to_move[:5]: # Wypisanie tylko kilku przykładów
+        print(f" - {f}")
+    if len(files_to_move) > 5:
+        print(f" - ... (oraz {len(files_to_move) - 5} innych)")
+        
+    choice = input("\nCzy chcesz przenieść TE wszystkie pliki do katalogu docelowego X? (Y/n): ").strip().lower()
+
+    if choice == 'n':
+        print("Anulowano finalne przenoszenie plików.")
+        return
+
+    print("\nRozpoczynanie przenoszenia...")
+    moved_count = 0
+    
+    # Lista katalogów, które mogą stać się puste i nadawać się do usunięcia
+    possible_empty_dirs = set() 
+    
+    for file_path in files_to_move:
+        # Zapisujemy katalog źródłowy do późniejszego ewentualnego usunięcia
+        source_dir = file_path.parent
+        if source_dir != target_dir:
+            possible_empty_dirs.add(source_dir)
+            
+        # Nowa ścieżka to nazwa pliku w katalogu X
+        target_path = target_dir / file_path.name
+        
+        try:
+            if target_path.exists():
+                print(f"⚠️ Konflikt nazwy: Plik {file_path.name} już istnieje w X. Pomijam przenoszenie {file_path}.")
+                continue
+                
+            shutil.move(file_path, target_path)
+            print(f"✅ Przeniesiono: {file_path} -> {target_path}")
+            moved_count += 1
+            
+        except Exception as e:
+            print(f"❌ Błąd przenoszenia {file_path}: {e}")
+
+    # Próba usunięcia pustych katalogów, z których przeniesiono pliki
+    print("\nPróba usunięcia pustych katalogów źródłowych...")
+    for directory in sorted(list(possible_empty_dirs), reverse=True):
+        try:
+            # Użycie rmdir do usunięcia tylko pustego katalogu
+            os.rmdir(directory)
+            print(f"    Usunięto pusty katalog: {directory}")
+        except OSError:
+            # Rmdir zgłosi błąd, jeśli katalog nie jest pusty
+            pass
+
+    print(f"\nOperacja zakończona. Przeniesiono {moved_count}/{len(files_to_move)} plików.")
+    print("="*60)
+    
 
 # --- FUNKCJA GŁÓWNA (MODYFIKACJA) ---
 
@@ -540,8 +591,6 @@ def main():
         'RENAME': 5,          # Zmiana nazwy
         'PERMISSIONS': 6,     # Zmiana uprawnień (CHMOD)
         'MOVE_ORIGINAL': 7,   # Przeniesienie (organizacja)
-        'MOVE_CONFLICT': 8,   # Konflikt nazwy (warto sprawdzić, co z tym zrobić)
-        'FINAL_MOVE': 9,  # Przeniesienie wszystkich pozostałych (Nowość)
     }
 
     # Sortowanie propozycji na podstawie klucza zdefiniowanego w SORT_ORDER
@@ -555,6 +604,25 @@ def main():
         execute_actions(suggestions, config)
     else:
         print("Anulowano wykonywanie akcji. Zakończenie pracy skryptu.")
+        
+    # 3. NOWY ETAP: Finalna Organizacja Luźnych Plików
+    # Używamy pierwotnej listy katalogów do skanowania (scan_dirs)
+    y_dirs = scan_dirs[1:]
+    
+    # Podkatalogi X (jeśli istnieją, dla operacji flatten)
+    try:
+        x_subdirs = [p.resolve() for p in target_dir.iterdir() if p.is_dir()]
+    except Exception as e:
+        print(f"Błąd odczytu podkatalogów X: {e}. Traktuję listę jako pustą.")
+        x_subdirs = []
+
+    dirs_to_scan_for_move = x_subdirs + y_dirs
+
+    files_to_move = find_files_for_final_move(dirs_to_scan_for_move)
+    prompt_and_move_all_files(files_to_move, target_dir)
+    
+    
+    print("\n--- ZAKOŃCZENIE PRACY SKRYPTU ---")
 
 
 if __name__ == "__main__":
