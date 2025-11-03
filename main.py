@@ -182,22 +182,41 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
             continue
 
         # c) Kłopotliwe nazwy
-        new_name = path.name
+        original_name = path.name
+        file_stem = path.stem       # Nazwa pliku bez rozszerzenia (np. 'raport.v1' dla 'raport.v1.pdf')
+        file_suffix = path.suffix   # Rozszerzenie (np. '.pdf')
+        
+        new_stem = file_stem
         needs_rename = False
+        
+        # Iteracja po nazwie bazowej (bez rozszerzenia)
         for char in config['trouble_chars']:
-            if char in new_name:
-                new_name = new_name.replace(char, config['substitute'])
+            if char in new_stem:
+                # Zamiana znaku
+                new_stem = new_stem.replace(char, config['substitute'])
                 needs_rename = True
         
+        # Jeśli oryginalna nazwa pliku zawierała kropki, które nie były rozszerzeniem, 
+        # i te kropki nie są traktowane jako kłopotliwe znaki w config, to problem z kropkami 
+        # wewnątrz nazwy bazowej jest już obsłużony przez 'file_stem'. 
+        
+        # Jeśli użytkownik chciałby traktować '.' jako kłopotliwy znak w środku nazwy,
+        # musi go uwzględnić w 'troublesome_chars' w pliku konfiguracyjnym. 
+        # Dzięki użyciu path.stem kropka separatora rozszerzenia jest bezpieczna.
+
         if needs_rename:
+            new_name = new_stem + file_suffix
             new_path = path.parent / new_name
-            suggestions.append({
-                'type': 'RENAME',
-                'path': path,
-                'suggestion': 'RENAME',
-                'reason': f"Nazwa zawiera kłopotliwe znaki. Sugerowana nazwa: {new_name}",
-                'target_path': new_path
-            })
+            
+            # Dodatkowy warunek, aby nie proponować zmiany, jeśli nowa nazwa jest taka sama
+            if new_name != original_name:
+                suggestions.append({
+                    'type': 'RENAME',
+                    'path': path,
+                    'suggestion': 'RENAME',
+                    'reason': f"Nazwa zawiera kłopotliwe znaki. Sugerowana nazwa: {new_name}",
+                    'target_path': new_path
+                })
         
         # d) Atrybuty (uproszczone: porównanie z oktalnym stringiem)
         target_permissions_octal = config['permissions'] # Zakładając, że to pole zostanie poprawnie obliczone
