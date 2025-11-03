@@ -319,8 +319,9 @@ def perform_action(suggestion, config):
                 
         elif action == 'CHMOD':
             # Zmiana uprawnień na wartość z konfiguracji
-            os.chmod(path, config['permissions_octal'])
-            print(f"✅ ZMIENIONO PRAW: {path} na {oct(config['permissions_octal'])[-3:]}")
+            octal_mode = int(config['permissions'], 8)
+            os.chmod(path, octal_mode)
+            print(f"✅ ZMIENIONO PRAW: {path} na {config['permissions']}")
             return True
             
         elif action == 'NO_ACTION':
