@@ -451,6 +451,19 @@ def main():
     # Załóżmy, że wszystkie funkcje pomocnicze są zdefiniowane i działają:
     all_files, hash_map = scan_directories(scan_dirs) # Wymaga zaimplementowania scan_directories
     suggestions = analyze_and_suggest_actions(all_files, hash_map, config) # Wymaga zaimplementowania analyze_and_suggest_actions
+    
+    SORT_ORDER = {
+        'TEMP_FILE': 1,       # Pliki tymczasowe
+        'EMPTY_FILE': 2,      # Puste pliki
+        'DUPLICATE': 3,       # Duplikaty (do usunięcia)
+        'RENAME': 4,          # Zmiana nazwy
+        'PERMISSIONS': 5,     # Zmiana uprawnień (CHMOD)
+        'MOVE_ORIGINAL': 6,   # Przeniesienie (organizacja)
+    }
+
+    # Sortowanie propozycji na podstawie klucza zdefiniowanego w SORT_ORDER
+    # Używamy .get z wysoką wartością domyślną (99), aby nieznane typy problemów znalazły się na końcu
+    suggestions.sort(key=lambda s: SORT_ORDER.get(s['type'], 99))
 
     print_suggestions(suggestions) # Wyświetlenie wszystkich propozycji
     
