@@ -200,7 +200,7 @@ def analyze_and_suggest_actions(all_files, hash_map, config):
             })
         
         # d) Atrybuty (uproszczone: porównanie z oktalnym stringiem)
-        target_permissions_octal = config['permissions_octal'] # Zakładając, że to pole zostanie poprawnie obliczone
+        target_permissions_octal = config['permissions'] # Zakładając, że to pole zostanie poprawnie obliczone
         if file_stats['permissions_octal'] != '644': # Używam 644 jako przykład
             suggestions.append({
                 'type': 'PERMISSIONS',
@@ -323,57 +323,44 @@ def perform_action(suggestion, config):
         return False
 
 
-def get_user_choice(suggestion):
-    """Pyta użytkownika o akcję i zwraca wybrany tryb."""
-    
-    # Dostępne akcje bazujące na sugestii
-    action_map = {
-        'DELETE': ['k', 'kasuj'],
-        'MOVE_TO_X': ['p', 'przenieś'],
-        'RENAME': ['z', 'zmień'],
-        'CHMOD': ['a', 'atrybut'],
-        'NO_ACTION': ['o', 'ominiń']
-    }
-    
-    # Mapowanie dla akcji globalnych (wykonywanych na wszystkich problemach danego typu)
-    global_map = {
-        'k': 'ALWAYS_DELETE',
-        'p': 'ALWAYS_MOVE',
-        'z': 'ALWAYS_RENAME',
-        'a': 'ALWAYS_CHMOD',
-        'o': 'ALWAYS_SKIP'
-    }
+GLOBAL_ACTION_MAP = {
+    'y': 'ALWAYS_PERFORM', # Zawsze wykonaj sugerowaną akcję
+    'n': 'ALWAYS_SKIP'     # Zawsze pomiń sugerowaną akcję
+}
 
+def get_user_choice(suggestion):
+    """
+    Pyta użytkownika o potwierdzenie SUGEROWANEJ akcji (Y/N/G - globalnie).
+    Zwraca: 'PERFORM', 'NO_ACTION', 'ALWAYS_PERFORM', 'ALWAYS_SKIP'
+    """
+    action = suggestion['suggestion']
+    
     prompt = (
-        f"Akcja dla {suggestion['path'].name} ({suggestion['suggestion']})? "
-        f"[K]asuj/{action_map['DELETE'][0]}, [P]rzenieś/{action_map['MOVE_TO_X'][0]}, "
-        f"[Z]mień_nazwę/{action_map['RENAME'][0]}, [O]miń/{action_map['NO_ACTION'][0]}, "
-        f"[A]trybuty/{action_map['CHMOD'][0]} lub [G]lobalnie (wszystkie tego typu): "
+        f"Czy chcesz wykonać akcję '{action}' na tym pliku? "
+        f"[Y]es, [N]o, [G]lobalnie (na wszystkich tego typu): "
     )
     
     while True:
         try:
             choice = input(prompt).strip().lower()
-            if not choice:
-                continue
-
-            # Sprawdzenie, czy to akcja globalna (G)
-            if choice == 'g':
-                global_action = input("Wybierz akcję globalną dla typu problemu: [K/P/Z/A/O]: ").strip().lower()
-                if global_action in global_map:
-                    return global_map[global_action]
-                else:
-                    print("Nieznana akcja globalna.")
-                    continue
             
-            # Sprawdzenie, czy to akcja lokalna
-            for action_name, keywords in action_map.items():
-                if choice in keywords:
-                    return action_name
-
-            print("Nieznana opcja. Spróbuj ponownie.")
+            if choice in ['y', 'yes']:
+                return 'PERFORM'
+            elif choice in ['n', 'no']:
+                return 'NO_ACTION'
+            elif choice == 'g':
+                global_choice = input(f"Zastosować akcję '{action}' globalnie (Y) czy pomijać globalnie (N)? [Y/N]: ").strip().lower()
+                if global_choice == 'y':
+                    return 'ALWAYS_PERFORM'
+                elif global_choice == 'n':
+                    return 'ALWAYS_SKIP'
+                else:
+                    print("Nieznana opcja. Spróbuj ponownie.")
+            else:
+                print("Nieznana opcja. Użyj Y, N lub G.")
+                
         except EOFError:
-            return 'NO_ACTION' # Zapobiega przerwaniu w trybie skryptowym
+            return 'NO_ACTION' 
             
 
 def execute_actions(suggestions, config):
@@ -394,31 +381,30 @@ def execute_actions(suggestions, config):
         # 1. Sprawdzenie, czy dla tego typu problemu zdefiniowano akcję globalną
         if action_type in global_actions:
             action = global_actions[action_type]
-            print(f"⚡ Globalna akcja ({action}) dla typu {action_type}.")
+            print(f"⚡ Globalna akcja: {action} dla typu {action_type}.")
         else:
             # 2. Wyświetlenie propozycji i zapytanie użytkownika
-            print(f"\n--- PROPOZYCJA DLA PLIKU: {suggestion['path'].name} ---")
+            print(f"\n--- PROPOZYCJA DLA PLIKU: {suggestion['path']} ---") 
             print(f"Problem: {suggestion['reason']}")
-            print(f"Sugerowana akcja: {current_suggestion}")
+            print(f"SUGEROWANA AKCJA: **{current_suggestion}**")
             
             user_choice = get_user_choice(suggestion)
             
             # 3. Przetworzenie wyboru użytkownika
             if user_choice.startswith('ALWAYS_'):
                 # Zapisanie akcji globalnej i wykonanie jej w obecnym przebiegu
-                action = user_choice.split('ALWAYS_')[1]
+                action = user_choice.split('ALWAYS_')[1] # np. PERFORM lub SKIP
                 global_actions[action_type] = action
                 print(f"🔥 Ustawiono akcję globalną '{action}' dla wszystkich typów '{action_type}'.")
             else:
-                action = user_choice # Akcja lokalna
+                action = user_choice # Akcja lokalna: PERFORM lub NO_ACTION
         
-        # 4. Nadpisanie sugestii i wykonanie
-        if action != 'NO_ACTION':
-             # Należy zaktualizować pole suggestion, bo użytkownik mógł wybrać inną akcję niż sugerowana
-             suggestion['suggestion'] = action 
+        # 4. Wykonanie akcji
+        if action == 'PERFORM' or (action == 'ALWAYS_PERFORM'):
+             # Używamy sugerowanej akcji, bo użytkownik ją zatwierdził (Y/ALWAYS_Y)
              perform_action(suggestion, config)
-        else:
-             print(f"➡️ POMINIĘTO: {suggestion['path']}")
+        elif action == 'NO_ACTION' or (action == 'ALWAYS_SKIP'):
+             print(f"➡️ POMINIĘTO: {suggestion['path']} na żądanie użytkownika.")
              
     print("\n" + "#"*60)
     print("✅ ZAKOŃCZONO FAZĘ WYKONYWANIA AKCJI.")
