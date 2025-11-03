@@ -290,7 +290,7 @@ def perform_action(suggestion, config):
             return False
 
     except FileNotFoundError:
-        print(f"❌ BŁĄD: Plik nie istnieje ({path}). Prawdopodobnie już usunięty/przeniesiony.")
+        print(f"❌ BŁĄD: Plik nie istnieje ({path}). Już usunięty/przeniesiony.")
         return False
     except PermissionError:
         print(f"❌ BŁĄD: Brak uprawnień do wykonania akcji na {path}.")
@@ -304,7 +304,7 @@ def get_user_choice(suggestion):
     
     prompt = (
         f"Czy chcesz wykonać akcję '{action}' na tym pliku? "
-        f"[Y]es, [N]o, [G]lobalnie (na wszystkich tego typu): "
+        f"[Y]es, [N]o, [G]lobalnie (na wszystkich z tym typem problemu): "
     )
     
     while True:
@@ -498,8 +498,6 @@ def main():
         print("Anulowano wykonywanie akcji. Zakończenie pracy skryptu.")
         
    
-    
-    
     print("\n--- ZAKOŃCZENIE PRACY SKRYPTU ---")
 
 
